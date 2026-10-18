@@ -1,0 +1,14 @@
+[Unit]
+Description=Static HTTP server for magbot hosted files
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/stoat-bot/venv/bin/python -m http.server 8080 --directory /opt/stoat-bot/www
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=/opt/stoat-bot/www
+
+[Install]
+WantedBy=default.target

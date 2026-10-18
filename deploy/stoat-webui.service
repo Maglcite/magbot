@@ -1,0 +1,18 @@
+[Unit]
+Description=magbot web UI (Stoat client for the magbot bot account)
+Documentation=file:/opt/stoat-bot/webui/server.py
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/stoat-bot/webui
+Environment=WEBUI_PORT=8099
+ExecStart=/opt/stoat-bot/venv/bin/python /opt/stoat-bot/webui/server.py
+Restart=always
+RestartSec=3
+KillSignal=SIGINT
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

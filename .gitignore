@@ -1,0 +1,13 @@
+.env
+*.env
+!.env.example
+webui/config.json
+personality_overrides.json
+optin.list
+optout.list
+optin-prompted.json
+*.log
+*.bak*
+__pycache__/
+venv/
+www/

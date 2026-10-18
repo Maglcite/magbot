@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d13">
+<title>magbot</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%23a06bff'/><text y='72' x='50' font-size='62' text-anchor='middle' fill='%23120b1e' font-family='sans-serif' font-weight='bold'>m</text></svg>">
+<link rel="stylesheet" href="style.css?v=11">
+</head>
+<body>
+  <div id="boot" class="boot">
+    <div class="boot-logo">m</div>
+    <p>connecting to magbot…</p>
+  </div>
+
+  <div id="login" class="login hidden">
+    <form id="login-form" class="login-card" autocomplete="on">
+      <div class="login-logo">m</div>
+      <h1>magbot</h1>
+      <p class="muted">A Stoat client that acts as the magbot account.<br>Sign in to continue.</p>
+      <label>Password
+        <input id="login-pass" type="password" autocomplete="current-password" required>
+      </label>
+      <button id="login-go" class="btn primary wide" type="submit">Sign in</button>
+      <p id="login-err" class="err"></p>
+      <p class="tiny muted">Password protected.</p>
+    </form>
+  </div>
+
+  <div id="main" class="app hidden">
+    <div id="conn-banner" class="conn-banner hidden">reconnecting to the stoat gateway…</div>
+    <nav id="rail" class="rail" aria-label="servers"></nav>
+    <div class="side-col">
+      <aside id="sidebar" class="sidebar" aria-label="channels"></aside>
+      <div id="me-bar" class="me-bar"></div>
+    </div>
+    <main id="chat" class="chat">
+      <header id="chat-head" class="chat-head"></header>
+      <div id="messages" class="messages" role="log" aria-live="polite"></div>
+      <div id="typing-bar" class="typing-bar"></div>
+      <div id="composer-wrap" class="composer-wrap"></div>
+    </main>
+    <aside id="members" class="members" aria-label="members"></aside>
+  </div>
+
+  <div id="modals"></div>
+  <div id="toasts" class="toasts"></div>
+
+  <script src="js/md.js?v=11"></script>
+  <script src="js/state.js?v=11"></script>
+  <script src="js/ui.js?v=11"></script>
+  <script src="js/app.js?v=11"></script>
+</body>
+</html>
