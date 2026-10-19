@@ -276,6 +276,32 @@ async def test_dm_counts_as_addressed(bot):
     assert msg.reactions == ["👀", "✅"]
 
 
+async def test_group_channel_needs_a_ping_or_name(bot):
+    # A group is a shared room: unlike a DM, a bare message does not address the bot.
+    allow(bot, ALICE_ID, "alice")
+    group = FakeChannel(channel_type="Group")
+    msg = await say(bot, group, person(ALICE_ID, "alice"), "hello there")
+    assert msg.outbox == [] and msg.reactions == []
+    assert bot.llm.calls == []
+
+    named = await say(bot, group, person(ALICE_ID, "alice"), "magbot hello there")
+    assert len(bot.llm.calls) == 1
+    assert named.reactions == ["👀", "✅"]
+
+    pinged = await say(bot, group, person(ALICE_ID, "alice"), "hello there", pinged=True)
+    assert len(bot.llm.calls) == 2
+    assert pinged.reactions == ["👀", "✅"]
+
+
+async def test_group_channel_bare_opt_phrase_is_not_a_command(bot):
+    # Bare "opt out" only works in a DM; in a group it must name the bot like elsewhere.
+    allow(bot, ALICE_ID, "alice")
+    group = FakeChannel(channel_type="Group")
+    msg = await say(bot, group, person(ALICE_ID, "alice"), "opt out")
+    assert msg.outbox == []
+    assert bot.llm.calls == []
+
+
 async def test_command_short_circuits_the_ai(bot, channel, throwaway_command):
     allow(bot, ALICE_ID, "alice")
     msg = await say(bot, channel, person(ALICE_ID, "alice"), throwaway_command)

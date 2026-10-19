@@ -11,7 +11,8 @@ Requires Python 3.11 or newer.
 ## Features
 
 - **Triggers.** It replies to an @-ping or to any configured name (`magbot`, `mag bot`, `mag-bot`,
-  `fembot` by default). In a DM every message counts as addressed to it.
+  `fembot` by default). In a DM every message counts as addressed to it; group channels follow the
+  server rule and need the ping or name.
 - **Channel context.** The last few messages in the channel are passed along, but only from users
   who have opted in. Pings and names are stripped from them. If a message is a reply, the message it
   replies to is passed too, when its author has opted in.

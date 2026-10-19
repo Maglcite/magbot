@@ -54,12 +54,17 @@ OPTOUT_DONE = (
 OPTOUT_ALREADY = "You're already opted out of my AI context — your messages aren't used. 👍"
 OPTOUT_FAILED = "Hmm, I couldn't update the opt-out list. Please contact the operator. ⚠️"
 
-_DM_CHANNELS = (stoat.DMChannel, stoat.GroupChannel, stoat.SavedMessagesChannel)
-_DM_TYPES = {"DirectMessage", "Group", "SavedMessages"}
+_DM_CHANNELS = (stoat.DMChannel, stoat.SavedMessagesChannel)
+_DM_TYPES = {"DirectMessage", "SavedMessages"}
 
 
 def _is_dm_like(channel: Any) -> bool:
-    """DM, group and saved-messages channels: everything there is addressed to the bot."""
+    """DM and saved-messages channels: everything there is addressed to the bot.
+
+    Group channels are NOT included: they are shared rooms with several humans,
+    so like server channels they need an @-ping or a configured name to count
+    as addressed. (Saved messages are the bot's own; nobody else can write there.)
+    """
     if isinstance(channel, _DM_CHANNELS):
         return True
     kind = getattr(channel, "channel_type", None)
