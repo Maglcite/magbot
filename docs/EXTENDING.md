@@ -154,10 +154,10 @@ things that are safe to show.
 
 ### Example: one command for everyone, one for admins
 
-Create `magbot/commands/info.py`:
+Create `magbot/commands/misc.py`:
 
 ```python
-"""Informational commands: /uptime for everyone, /tools for admins."""
+"""Example commands: /uptime for everyone, /tools for admins."""
 from __future__ import annotations
 
 import time
@@ -182,7 +182,7 @@ async def list_tools(ctx: CommandContext) -> None:
 Import it at the bottom of `magbot/commands/__init__.py`:
 
 ```python
-from . import help, info, moderation, purge  # noqa: E402,F401
+from . import help, info, misc, moderation, purge  # noqa: E402,F401
 ```
 
 For a command that acts on a server (as `/ban` does), use `moderation.server_of(ctx.message)` to find
@@ -191,10 +191,10 @@ the server, and `moderation.target_user_id(ctx.args)` to read an `<@ID>` mention
 ### Test with a fake message
 
 `dispatch()` only needs an object with `content` and an async `reply()`. Tests don't need a Stoat
-connection. Create `tests/test_commands_info.py`:
+connection. Create `tests/test_commands_misc.py`:
 
 ```python
-"""Tests for magbot/commands/info.py using a fake message. No Stoat connection."""
+"""Tests for magbot/commands/misc.py using a fake message. No Stoat connection."""
 from __future__ import annotations
 
 from magbot.commands import dispatch
@@ -298,8 +298,8 @@ For a rule that applies to one person only, use `bot.overrides_file`, a JSON obj
 }
 ```
 
-The override is added to that speaker's system message only. Restart the bot after editing the
-persona or the overrides file.
+The override is added to that speaker's system message only. Edits to the persona and the
+overrides file are picked up on the next reply; no restart needed.
 
 ## Adding an LLM provider or a fallback
 

@@ -24,12 +24,45 @@ def test_import_respects_consent_and_maps_ids(tmp_path):
     out = subprocess.run([sys.executable, str(SCRIPT), "--config", str(cfg), str(mem),
                           "--skip", "^Heartbeat:"],
                          capture_output=True, text=True, check=True).stdout
-    assert "user: 1, global: 1, no consent: 1, unknown id: 1, skipped: 1" in out
+    assert "user: 1, global: 1, pending: 0, no consent: 2, skipped: 1" in out
 
     store = MemoryStore(data / "memory.db")
     assert [m.text for m in store.for_user("01AAAAAAAAAAAAAAAAAAAAAAA1")] == ["alice#1001: likes birds."]
     assert [m.text for m in store.for_user(MemoryStore.GLOBAL)] == ["Be kind to everyone."]
     assert store.for_user("01CCCCCCCCCCCCCCCCCCCCCCC3") == []
+    assert store.pending_count() == 0
+    store.close()
+
+
+def test_opted_in_tag_without_id_is_kept_pending_and_claimed_later(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    # dave is opted in by tag only; erin is opted out; frank is not on any list.
+    (data / "optin.list").write_text("TAG dave#4004\nTAG erin#5005\n")
+    (data / "optout.list").write_text("TAG erin#5005\n")
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(f'[bot]\ndata_dir = "{data}"\nwww_dir = "{tmp_path / "www"}"\n')
+    mem = tmp_path / "MEMORY.md"
+    mem.write_text("dave#4004 likes chess.\n§\nerin#5005 has a secret.\n§\n"
+                   "frank#6006 is unknown.\n§\n")
+
+    out = subprocess.run([sys.executable, str(SCRIPT), "--config", str(cfg), str(mem)],
+                         capture_output=True, text=True, check=True).stdout
+    assert "user: 0, global: 0, pending: 1, no consent: 2, skipped: 0" in out
+    assert "dave#4004" in out and "kept pending" in out
+
+    store = MemoryStore(data / "memory.db")
+    assert store.pending_count() == 1
+    assert [m.text for m in store.for_user(MemoryStore.tag_key("dave#4004"))] == [
+        "dave#4004 likes chess."]
+    assert store.for_user(MemoryStore.tag_key("erin#5005")) == []
+    assert store.for_user(MemoryStore.tag_key("frank#6006")) == []
+
+    # When dave next talks, the bot claims by tag and the entry attaches to his id.
+    assert store.claim("dave#4004", "01DDDDDDDDDDDDDDDDDDDDDDD4") == 1
+    assert [m.text for m in store.for_user("01DDDDDDDDDDDDDDDDDDDDDDD4")] == [
+        "dave#4004 likes chess."]
+    assert store.pending_count() == 0
     store.close()
 
 

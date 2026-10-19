@@ -6,6 +6,10 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import json
+import logging
+import os
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +24,7 @@ from magbot.bot import (
     OPTOUT_FAILED,
     REFUSAL,
     MagBot,
+    RateLimiter,
 )
 from magbot.commands import REGISTRY as COMMANDS
 from magbot.commands import command
@@ -46,6 +51,8 @@ class FakeLLM:
     def __init__(self):
         self.text = "All good!"
         self.reasoning = ""
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
         self.error: Exception | None = None
         self.calls: list[tuple[list[dict], object]] = []
 
@@ -53,7 +60,8 @@ class FakeLLM:
         self.calls.append((messages, ctx))
         if self.error is not None:
             raise self.error
-        return Reply(text=self.text, reasoning=self.reasoning, provider="fake")
+        return Reply(text=self.text, reasoning=self.reasoning, provider="fake",
+                     prompt_tokens=self.prompt_tokens, completion_tokens=self.completion_tokens)
 
 
 def person(uid: str, name: str, disc: str = "0002", *, bot: bool = False) -> SimpleNamespace:
@@ -85,6 +93,9 @@ class FakeChannel:
         self.id = CHANNEL_ID
         self.channel_type = channel_type
         self._history = list(history)      # oldest first
+        self.by_id: dict[str, FakeMessage] = {}   # messages fetch_message can return
+        self.fetch_calls: list[str] = []
+        self.fetch_fails = False
         self.history_calls: list[tuple] = []
         self.sent: list[str] = []
         self.typing_starts = 0
@@ -94,6 +105,14 @@ class FakeChannel:
         self.history_calls.append((limit, before))
         newest_first = list(reversed(self._history))  # the API returns newest first
         return newest_first[:limit] if limit else newest_first
+
+    async def fetch_message(self, message, **_):
+        self.fetch_calls.append(message)
+        if self.fetch_fails:
+            raise RuntimeError("fetch broke")
+        if message not in self.by_id:
+            raise LookupError(message)
+        return self.by_id[message]
 
     def typing(self):
         return self._typing()
@@ -111,7 +130,7 @@ class FakeChannel:
 
 class FakeMessage:
     def __init__(self, channel: FakeChannel, author: SimpleNamespace, content: str = "", *,
-                 id: str = "MSG", mention_ids=(), attachments=()):
+                 id: str = "MSG", mention_ids=(), attachments=(), replies=()):
         self.id = id
         self.channel = channel
         self.channel_id = channel.id
@@ -120,14 +139,15 @@ class FakeMessage:
         self.content = content
         self.mention_ids = list(mention_ids)
         self.attachments = list(attachments)
-        self.replies: list[tuple[str, bool]] = []
+        self.replies = list(replies)     # ids of the messages this one replies to (as in stoat)
+        self.outbox: list[tuple[str, bool]] = []
         self.reactions: list[str] = []
         self.reply_fails = False
 
     async def reply(self, content=None, *, mention=True, **_):
         if self.reply_fails:
             raise RuntimeError("reply broke")
-        self.replies.append((content, mention))
+        self.outbox.append((content, mention))
 
     async def react(self, emoji, **_):
         self.reactions.append(emoji)
@@ -142,7 +162,7 @@ async def say(bot: MagBot, channel: FakeChannel, author: SimpleNamespace, conten
 
 
 def reply_texts(message: FakeMessage) -> list[str]:
-    return [text for text, _ in message.replies]
+    return [text for text, _ in message.outbox]
 
 
 def allow(bot: MagBot, uid: str, name: str, disc: str = "0002") -> None:
@@ -199,7 +219,7 @@ async def test_opt_in_command_allows_user_and_confirms(bot, channel):
     carol = person(CAROL_ID, "carol")
     msg = await say(bot, channel, carol, "magbot opt in")
     assert bot.consent.is_allowed(user_of(CAROL_ID, "carol"))
-    assert msg.replies == [(OPTIN_DONE.format(name="magbot"), True)]
+    assert msg.outbox == [(OPTIN_DONE.format(name="magbot"), True)]
     assert bot.llm.calls == []
 
 
@@ -213,7 +233,7 @@ async def test_opt_out_excludes_user_and_forgets_their_memories(bot, channel):
     assert not bot.consent.is_allowed(alice)
     assert bot.memory.for_user(ALICE_ID) == []
     assert [m.text for m in bot.memory.for_user(MemoryStore.GLOBAL)] == ["the server is cozy"]
-    assert msg.replies == [(OPTOUT_DONE.format(name="magbot"), True)]
+    assert msg.outbox == [(OPTOUT_DONE.format(name="magbot"), True)]
 
 
 async def test_excluded_user_is_silent_and_never_prompted_again(bot, channel):
@@ -221,7 +241,7 @@ async def test_excluded_user_is_silent_and_never_prompted_again(bot, channel):
     await say(bot, channel, person(ALICE_ID, "alice"), "magbot opt out")
     before = len(channel.sent)
     msg = await say(bot, channel, person(ALICE_ID, "alice"), "magbot are you there?", pinged=True)
-    assert msg.replies == [] and msg.reactions == []
+    assert msg.outbox == [] and msg.reactions == []
     assert len(channel.sent) == before
     assert bot.llm.calls == []
 
@@ -230,21 +250,21 @@ async def test_unopted_user_gets_optin_prompt_once(bot, channel):
     carol = person(CAROL_ID, "carol")
     first = await say(bot, channel, carol, "magbot hi")
     second = await say(bot, channel, carol, "magbot hi again")
-    assert first.replies == [(optin_message(bot.config), False)]
-    assert second.replies == []
+    assert first.outbox == [(optin_message(bot.config), False)]
+    assert second.outbox == []
     assert bot.llm.calls == []
 
 
 async def test_unaddressed_message_from_allowed_user_is_ignored(bot, channel):
     allow(bot, ALICE_ID, "alice")
     msg = await say(bot, channel, person(ALICE_ID, "alice"), "nice weather today")
-    assert msg.replies == [] and msg.reactions == []
+    assert msg.outbox == [] and msg.reactions == []
     assert bot.llm.calls == []
 
 
 async def test_unaddressed_message_from_unopted_user_gets_no_prompt(bot, channel):
     msg = await say(bot, channel, person(CAROL_ID, "carol"), "nice weather today")
-    assert msg.replies == []
+    assert msg.outbox == []
     assert bot.llm.calls == []
 
 
@@ -259,7 +279,7 @@ async def test_dm_counts_as_addressed(bot):
 async def test_command_short_circuits_the_ai(bot, channel, throwaway_command):
     allow(bot, ALICE_ID, "alice")
     msg = await say(bot, channel, person(ALICE_ID, "alice"), throwaway_command)
-    assert msg.replies == [("pong", False)]
+    assert msg.outbox == [("pong", False)]
     assert bot.llm.calls == []
     assert msg.reactions == []
 
@@ -268,12 +288,12 @@ async def test_unsafe_text_refused_for_non_admin_but_passes_for_admin(bot, chann
     allow(bot, ALICE_ID, "alice")
     allow(bot, ADMIN_ID, "boss", "0001")
     refused = await say(bot, channel, person(ALICE_ID, "alice"), "magbot rm -rf /", pinged=True)
-    assert refused.replies == [(REFUSAL, True)]
+    assert refused.outbox == [(REFUSAL, True)]
     assert bot.llm.calls == []
 
     allowed = await say(bot, channel, person(ADMIN_ID, "boss", "0001"), "magbot rm -rf /",
                         pinged=True)
-    assert allowed.replies == [("All good!", False)]
+    assert allowed.outbox == [("All good!", False)]
     assert len(bot.llm.calls) == 1
 
 
@@ -289,7 +309,7 @@ async def test_ping_gets_ai_reply_with_context_from_allowed_authors_only(bot, ch
                     pinged=True)
 
     assert msg.reactions == ["👀", "✅"]
-    assert msg.replies == [("All good!", False)]
+    assert msg.outbox == [("All good!", False)]
     assert channel.history_calls == [(bot.config.bot.recent_context, "MSG")]
 
     (messages, ctx), = bot.llm.calls
@@ -309,10 +329,10 @@ async def test_long_reply_is_split_into_chunks(bot, channel):
     bot.llm.text = ("lorem ipsum dolor sit amet " * 200).strip()
     msg = await say(bot, channel, person(ALICE_ID, "alice"), "magbot tell me a story",
                     pinged=True)
-    assert len(msg.replies) > 1
-    assert all(len(text) <= bot.config.bot.max_message_chars for text, _ in msg.replies)
-    assert all(mention is False for _, mention in msg.replies)
-    joined = " ".join(text for text, _ in msg.replies).split()
+    assert len(msg.outbox) > 1
+    assert all(len(text) <= bot.config.bot.max_message_chars for text, _ in msg.outbox)
+    assert all(mention is False for _, mention in msg.outbox)
+    joined = " ".join(text for text, _ in msg.outbox).split()
     assert joined == bot.llm.text.split()
 
 
@@ -321,7 +341,7 @@ async def test_model_failure_sends_error_reply(bot, channel, error):
     allow(bot, ALICE_ID, "alice")
     bot.llm.error = error
     msg = await say(bot, channel, person(ALICE_ID, "alice"), "magbot hello", pinged=True)
-    assert msg.replies == [(ERROR_REPLY, False)]
+    assert msg.outbox == [(ERROR_REPLY, False)]
 
 
 async def test_images_are_passed_to_the_model_and_not_saved(bot, channel):
@@ -376,7 +396,7 @@ async def test_thinking_trace_prepended_when_enabled(bot, channel, mode, traced)
     bot.config.bot.thinking_mode = mode
     bot.llm.reasoning = "check the facts first"
     msg = await say(bot, channel, person(ALICE_ID, "alice"), "magbot think", pinged=True)
-    (text, _), = msg.replies
+    (text, _), = msg.outbox
     if traced:
         assert text.startswith("> 💭 **Thinking**")
         assert "> check the facts first" in text
@@ -390,14 +410,16 @@ async def test_typing_failure_still_produces_a_reply(bot, channel):
     channel.typing_fails = True
     msg = await say(bot, channel, person(ALICE_ID, "alice"), "magbot hello", pinged=True)
     assert len(bot.llm.calls) == 1
-    assert msg.replies == [("All good!", False)]
+    assert msg.outbox == [("All good!", False)]
 
 
-async def test_memories_notes_and_overrides_reach_the_prompt(bot, channel):
+async def test_memories_notes_and_overrides_reach_the_prompt(bot, channel, tmp_path):
     allow(bot, ALICE_ID, "alice")
     bot.memory.add(ALICE_ID, "likes tea")
     bot.memory.add(MemoryStore.GLOBAL, "the server is cozy")
-    bot.overrides = {"alice#0002": "always answer in rhymes"}
+    overrides = tmp_path / "overrides.json"
+    overrides.write_text(json.dumps({"alice#0002": "always answer in rhymes"}))
+    bot.config.bot.overrides_file = str(overrides)
     await say(bot, channel, person(ALICE_ID, "alice"), "magbot hello", pinged=True)
     (messages, _ctx), = bot.llm.calls
     system = messages[0]["content"]
@@ -415,7 +437,7 @@ async def test_opt_out_failure_still_forgets_memories_and_says_so(bot, channel, 
 
     monkeypatch.setattr(bot.consent, "deny", broken_deny)
     msg = await say(bot, channel, person(ALICE_ID, "alice"), "magbot opt out")
-    assert msg.replies == [(OPTOUT_FAILED, True)]
+    assert msg.outbox == [(OPTOUT_FAILED, True)]
     assert bot.memory.for_user(ALICE_ID) == []
 
 
@@ -425,7 +447,7 @@ async def test_opt_in_failure_is_reported(bot, channel, monkeypatch):
 
     monkeypatch.setattr(bot.consent, "allow", broken_allow)
     msg = await say(bot, channel, person(CAROL_ID, "carol"), "magbot opt in")
-    assert msg.replies == [(OPTIN_FAILED, True)]
+    assert msg.outbox == [(OPTIN_FAILED, True)]
 
 
 async def test_on_ready_records_the_bot_id(bot):
@@ -434,3 +456,264 @@ async def test_on_ready_records_the_bot_id(bot):
                             servers=[SimpleNamespace(name="srv", id="SRV")])
     await bot.on_ready(event)
     assert bot.config.self_id == BOT_ID
+
+
+# ── rate limit ───────────────────────────────────────────────────────────────
+
+class FakeClock:
+    """Stands in for time.monotonic so tests can move the window forward."""
+
+    def __init__(self, now: float = 1000.0):
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock(bot) -> FakeClock:
+    fake = FakeClock()
+    bot.rate_limiter = RateLimiter(clock=fake)
+    return fake
+
+
+async def test_rate_limit_stops_the_model_and_reacts_once(bot, channel, clock):
+    allow(bot, ALICE_ID, "alice")
+    bot.config.bot.rate_limit_per_minute = 2
+    alice = person(ALICE_ID, "alice")
+    await say(bot, channel, alice, "magbot one", pinged=True)
+    await say(bot, channel, alice, "magbot two", pinged=True)
+    third = await say(bot, channel, alice, "magbot three", pinged=True)
+
+    assert third.reactions == ["⏳"]
+    assert third.outbox == []
+    assert len(bot.llm.calls) == 2
+    assert bot.stats["rate_limited"] == 1
+    assert bot.stats["replies"] == 2
+
+
+async def test_rate_limit_window_expires_after_sixty_seconds(bot, channel, clock):
+    allow(bot, ALICE_ID, "alice")
+    bot.config.bot.rate_limit_per_minute = 1
+    alice = person(ALICE_ID, "alice")
+    await say(bot, channel, alice, "magbot one", pinged=True)
+    clock.now += 59
+    blocked = await say(bot, channel, alice, "magbot two", pinged=True)
+    assert blocked.reactions == ["⏳"]
+    clock.now += 1          # the first request is now exactly 60 seconds old
+    allowed = await say(bot, channel, alice, "magbot three", pinged=True)
+    assert allowed.reactions == ["👀", "✅"]
+    assert len(bot.llm.calls) == 2
+
+
+async def test_admins_are_exempt_from_the_rate_limit(bot, channel, clock):
+    allow(bot, ADMIN_ID, "boss", "0001")
+    bot.config.bot.rate_limit_per_minute = 1
+    boss = person(ADMIN_ID, "boss", "0001")
+    for i in range(3):
+        await say(bot, channel, boss, f"magbot {i}", pinged=True)
+    assert len(bot.llm.calls) == 3
+    assert bot.stats["rate_limited"] == 0
+
+
+async def test_rate_limit_zero_turns_the_limit_off(bot, channel, clock):
+    allow(bot, ALICE_ID, "alice")
+    bot.config.bot.rate_limit_per_minute = 0
+    for i in range(5):
+        await say(bot, channel, person(ALICE_ID, "alice"), f"magbot {i}", pinged=True)
+    assert len(bot.llm.calls) == 5
+
+
+async def test_rate_limit_is_per_user(bot, channel, clock):
+    allow(bot, ALICE_ID, "alice")
+    allow(bot, EVE_ID, "eve", "0003")
+    bot.config.bot.rate_limit_per_minute = 1
+    await say(bot, channel, person(ALICE_ID, "alice"), "magbot one", pinged=True)
+    blocked = await say(bot, channel, person(ALICE_ID, "alice"), "magbot two", pinged=True)
+    other = await say(bot, channel, person(EVE_ID, "eve", "0003"), "magbot hi", pinged=True)
+    assert blocked.reactions == ["⏳"]
+    assert other.reactions == ["👀", "✅"]
+
+
+async def test_rate_limited_message_does_not_count_against_the_window(bot, channel, clock):
+    allow(bot, ALICE_ID, "alice")
+    bot.config.bot.rate_limit_per_minute = 1
+    alice = person(ALICE_ID, "alice")
+    await say(bot, channel, alice, "magbot one", pinged=True)            # t=1000, allowed
+    clock.now += 30
+    await say(bot, channel, alice, "magbot two", pinged=True)            # blocked, not recorded
+    clock.now += 30                                                      # t=1060
+    allowed = await say(bot, channel, alice, "magbot three", pinged=True)
+    assert allowed.reactions == ["👀", "✅"]
+
+
+def test_rate_limiter_drops_idle_keys_and_empty_entries():
+    clock = FakeClock()
+    limiter = RateLimiter(window=60, clock=clock)
+    for uid in ("a", "b", "c"):
+        limiter.record(uid)
+    assert set(limiter._hits) == {"a", "b", "c"}
+    clock.now += 61
+    limiter.record("d")                  # a record past the window sweeps the idle keys
+    assert set(limiter._hits) == {"d"}
+    assert limiter.is_limited("d", 1)
+    clock.now += 61
+    assert not limiter.is_limited("d", 1)
+    assert limiter._hits == {}           # the empty entry is dropped on lookup
+
+
+def test_rate_limiter_zero_limit_never_limits():
+    limiter = RateLimiter(clock=FakeClock())
+    limiter.record("a")
+    assert not limiter.is_limited("a", 0)
+
+
+# ── replied-to message ───────────────────────────────────────────────────────
+
+async def test_replied_to_message_from_opted_in_author_reaches_the_prompt(bot, channel):
+    allow(bot, ALICE_ID, "alice")
+    allow(bot, EVE_ID, "eve", "0003")
+    channel.by_id["ORIG"] = FakeMessage(channel, person(EVE_ID, "eve", "0003"),
+                                        "the deploy broke at noon", id="ORIG")
+    msg = FakeMessage(channel, person(ALICE_ID, "alice"), "magbot why?", id="NEW",
+                      mention_ids=[BOT_ID], replies=["ORIG"])
+    await bot.on_message(msg)
+
+    assert channel.fetch_calls == ["ORIG"]
+    (messages, _ctx), = bot.llm.calls
+    assert messages[1]["content"] == (
+        "[The message they are replying to]\n"
+        "eve#0003: the deploy broke at noon\n\n"
+        "[Message from alice#0002]\nwhy?")
+
+
+async def test_replied_to_message_from_user_without_opt_in_is_skipped(bot, channel):
+    allow(bot, ALICE_ID, "alice")
+    channel.by_id["ORIG"] = FakeMessage(channel, person(CAROL_ID, "carol"),
+                                        "carol's private thing", id="ORIG")
+    msg = FakeMessage(channel, person(ALICE_ID, "alice"), "magbot why?", id="NEW",
+                      mention_ids=[BOT_ID], replies=["ORIG"])
+    await bot.on_message(msg)
+
+    assert channel.fetch_calls == ["ORIG"]
+    (messages, _ctx), = bot.llm.calls
+    assert "replying to" not in messages[1]["content"]
+    assert "private thing" not in messages[1]["content"]
+    assert "private thing" not in messages[0]["content"]
+
+
+async def test_replied_to_fetch_error_still_replies_without_it(bot, channel):
+    allow(bot, ALICE_ID, "alice")
+    channel.fetch_fails = True
+    msg = FakeMessage(channel, person(ALICE_ID, "alice"), "magbot why?", id="NEW",
+                      mention_ids=[BOT_ID], replies=["ORIG"])
+    await bot.on_message(msg)
+
+    assert len(bot.llm.calls) == 1
+    assert msg.outbox == [("All good!", False)]
+    (messages, _ctx), = bot.llm.calls
+    assert "replying to" not in messages[1]["content"]
+
+
+async def test_replied_to_message_already_in_context_is_not_fetched(bot, channel):
+    allow(bot, ALICE_ID, "alice")
+    channel._history = [FakeMessage(channel, person(ALICE_ID, "alice"), "the earlier point",
+                                    id="ORIG")]
+    msg = FakeMessage(channel, person(ALICE_ID, "alice"), "magbot expand on that", id="NEW",
+                      mention_ids=[BOT_ID], replies=["ORIG"])
+    await bot.on_message(msg)
+
+    assert channel.fetch_calls == []
+    (messages, _ctx), = bot.llm.calls
+    user_turn = messages[1]["content"]
+    assert "- alice#0002: the earlier point" in user_turn
+    assert "replying to" not in user_turn
+
+
+# ── pending memories ─────────────────────────────────────────────────────────
+
+async def test_pending_memories_are_claimed_before_the_reply(bot, channel, monkeypatch, caplog):
+    allow(bot, ALICE_ID, "alice")
+    calls: list[tuple[str, str]] = []
+
+    def claim(tag, user_id):
+        calls.append((tag, user_id))
+        return 2
+
+    monkeypatch.setattr(bot.memory, "claim", claim)
+    with caplog.at_level(logging.INFO):
+        msg = await say(bot, channel, person(ALICE_ID, "alice"), "magbot hello", pinged=True)
+    assert calls == [("alice#0002", ALICE_ID)]
+    assert msg.outbox == [("All good!", False)]
+    assert any("claimed 2 pending memories for alice#0002" in r.getMessage()
+               for r in caplog.records)
+
+
+async def test_claim_is_not_called_for_users_without_opt_in(bot, channel, monkeypatch):
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(bot.memory, "claim", lambda tag, uid: calls.append((tag, uid)) or 0)
+    await say(bot, channel, person(CAROL_ID, "carol"), "magbot hello", pinged=True)
+    assert calls == []
+
+
+async def test_claim_failure_does_not_block_the_reply(bot, channel, monkeypatch):
+    allow(bot, ALICE_ID, "alice")
+
+    def broken(tag, user_id):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(bot.memory, "claim", broken)
+    msg = await say(bot, channel, person(ALICE_ID, "alice"), "magbot hello", pinged=True)
+    assert msg.outbox == [("All good!", False)]
+
+
+# ── stats ────────────────────────────────────────────────────────────────────
+
+async def test_stats_count_replies_and_tokens(bot, channel):
+    allow(bot, ALICE_ID, "alice")
+    bot.llm.prompt_tokens = 120
+    bot.llm.completion_tokens = 30
+    await say(bot, channel, person(ALICE_ID, "alice"), "magbot hello", pinged=True)
+    assert bot.stats == {"replies": 1, "errors": 0, "rate_limited": 0,
+                         "prompt_tokens": 120, "completion_tokens": 30}
+
+
+async def test_stats_count_model_errors(bot, channel):
+    allow(bot, ALICE_ID, "alice")
+    bot.llm.error = LLMError("all providers down")
+    await say(bot, channel, person(ALICE_ID, "alice"), "magbot hello", pinged=True)
+    assert bot.stats["errors"] == 1
+    assert bot.stats["replies"] == 0
+
+
+def test_started_at_is_set_at_startup(bot):
+    assert abs(bot.started_at - time.time()) < 60
+
+
+# ── live persona reload ──────────────────────────────────────────────────────
+
+async def test_persona_edits_apply_to_the_next_reply(bot, channel, tmp_path):
+    allow(bot, ALICE_ID, "alice")
+    persona = tmp_path / "persona.md"
+    persona.write_text("VERSION ONE for {bot_name}")
+    os.utime(persona, ns=(1_000_000_000_000, 1_000_000_000_000))
+    bot.config.bot.persona_file = str(persona)
+    await say(bot, channel, person(ALICE_ID, "alice"), "magbot hello", pinged=True)
+
+    persona.write_text("VERSION TWO for {bot_name}")
+    os.utime(persona, ns=(2_000_000_000_000, 2_000_000_000_000))
+    await say(bot, channel, person(ALICE_ID, "alice"), "magbot again", pinged=True)
+
+    first, second = [messages[0]["content"] for messages, _ in bot.llm.calls]
+    assert first.startswith("VERSION ONE for magbot")
+    assert second.startswith("VERSION TWO for magbot")
+
+
+async def test_missing_persona_is_logged_once_not_per_message(bot, channel, caplog):
+    allow(bot, ALICE_ID, "alice")
+    with caplog.at_level(logging.WARNING):
+        for i in range(3):
+            await say(bot, channel, person(ALICE_ID, "alice"), f"magbot {i}", pinged=True)
+    warnings = [r for r in caplog.records if "persona file" in r.getMessage()]
+    assert len(warnings) == 1
+    assert len(bot.llm.calls) == 3

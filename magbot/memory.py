@@ -95,14 +95,60 @@ class MemoryStore:
             self._db.commit()
             return cur.rowcount > 0
 
-    def forget_user(self, user_id: str) -> int:
-        """Delete every memory about `user_id` (used on opt-out). Returns the count."""
+    def forget_user(self, user_id: str, tag: str = "") -> int:
+        """Delete every memory about `user_id` (used on opt-out). With `tag`, also the
+        memories still pending under that tag. Returns the count."""
+        keys = [user_id] + ([self.tag_key(tag)] if tag.strip() else [])
         with self._lock:
-            cur = self._db.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
+            cur = self._db.execute(
+                f"DELETE FROM memories WHERE user_id IN ({','.join('?' * len(keys))})", keys)
             self._db.commit()
             count = cur.rowcount
         if count:
             log.info("memory: forgot %d entries for %s", count, user_id)
+        return count
+
+    @staticmethod
+    def tag_key(tag: str) -> str:
+        """The user_id under which memories for a not-yet-known user are kept, by tag."""
+        return "tag:" + tag.strip().lower()
+
+    def claim(self, tag: str, user_id: str) -> int:
+        """Move the memories kept under `tag_key(tag)` to `user_id`. Returns the count moved.
+
+        A pending memory whose exact text `user_id` already has is deleted instead.
+        Called on every message, so with nothing pending it is a single indexed lookup.
+        """
+        key = self.tag_key(tag)
+        if key == "tag:" or not user_id:
+            return 0
+        with self._lock:
+            pending = self._db.execute(
+                "SELECT id, text FROM memories WHERE user_id = ? ORDER BY id", (key,)
+            ).fetchall()
+            if not pending:
+                return 0
+            have = {text for (text,) in self._db.execute(
+                "SELECT text FROM memories WHERE user_id = ?", (user_id,))}
+            moved = 0
+            for row_id, text in pending:
+                if text in have:
+                    self._db.execute("DELETE FROM memories WHERE id = ?", (row_id,))
+                else:
+                    self._db.execute("UPDATE memories SET user_id = ? WHERE id = ?",
+                                     (user_id, row_id))
+                    have.add(text)
+                    moved += 1
+            self._db.commit()
+        if moved:
+            log.info("memory: claimed %d pending entries for %s", moved, user_id)
+        return moved
+
+    def pending_count(self) -> int:
+        """How many memories are still kept under a tag key (users not yet claimed)."""
+        with self._lock:
+            (count,) = self._db.execute(
+                "SELECT COUNT(*) FROM memories WHERE user_id LIKE 'tag:%'").fetchone()
         return count
 
     def close(self) -> None:

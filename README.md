@@ -13,7 +13,10 @@ Requires Python 3.11 or newer.
 - **Triggers.** It replies to an @-ping or to any configured name (`magbot`, `mag bot`, `mag-bot`,
   `fembot` by default). In a DM every message counts as addressed to it.
 - **Channel context.** The last few messages in the channel are passed along, but only from users
-  who have opted in. Pings and names are stripped from them.
+  who have opted in. Pings and names are stripped from them. If a message is a reply, the message it
+  replies to is passed too, when its author has opted in.
+- **Rate limit.** Each user gets `bot.rate_limit_per_minute` AI replies per minute (6 by default).
+  Admins are exempt. Over the limit the bot reacts with ⏳ and does not call the model. 0 turns it off.
 - **Tools.** The model can call the tools below. Tools a user may not use are hidden from the model.
 - **Long-term memory.** Facts are kept in a local SQLite database, per user, plus global notes that
   only admins can write. Users can see and delete their own; admins can delete any.
@@ -118,7 +121,8 @@ python -m magbot
 ```
 
 `persona.md` is the default system prompt. Edit it in place or point `bot.persona_file` at another file.
-Its `{bot_name}` and `{file_base_url}` placeholders are filled in at startup.
+Its `{bot_name}` and `{file_base_url}` placeholders are filled in. The persona and the overrides file
+are re-read when they change, so edits apply to the next message without a restart.
 
 The defaults for `bot.data_dir` (`/opt/magbot/data`) and `bot.www_dir` (`/opt/magbot/www`) are for the
 systemd install. For a manual run, set both in `config.toml` to directories you own, such as `./data`
@@ -167,7 +171,7 @@ Sections:
 
 | section | what it holds |
 | --- | --- |
-| `[bot]` | names, admins, shell users, data and web folders, persona, context size, thinking display |
+| `[bot]` | names, admins, shell users, data and web folders, persona, context size, per-user rate limit, thinking display |
 | `[[llm.providers]]` | one table per provider, tried in order: base URL, model, key variable, vision, reasoning effort |
 | `[llm]` | reply timeout, tool steps, token limit, temperature |
 | `[tools]` | disabled tools, search backend, shell limits, image endpoint |
@@ -181,8 +185,8 @@ sends a short explanation of how to opt in, at most once per cooldown (12 hours 
 and out is done by naming the bot: `magbot opt in` or `magbot opt out`.
 
 When an opted-in user messages the bot, the message, the few recent messages around it (from opted-in
-users only), any images attached to it, and their saved memories are sent to the configured model
-provider. Anything the model writes into `www_dir` is public at `file_base_url`. Opting out deletes the
+users only), the message it replies to (only if its author is opted in), any images attached to it, and
+their saved memories are sent to the configured model provider. Anything the model writes into `www_dir` is public at `file_base_url`. Opting out deletes the
 user's saved memories.
 
 Operators can exclude people silently with `consent.always_exclude` or `optout.list`. Anyone with
@@ -214,7 +218,7 @@ async def roll_dice(ctx: ToolContext, sides: int) -> str:
 ```
 
 ```python
-# magbot/commands/info.py, then import it at the bottom of magbot/commands/__init__.py
+# magbot/commands/misc.py, then import it at the bottom of magbot/commands/__init__.py
 @command("uptime", help="How long the bot has been running.")
 async def uptime(ctx: CommandContext) -> None:
     await ctx.reply(f"Up for {int(time.time() - STARTED)} seconds.")

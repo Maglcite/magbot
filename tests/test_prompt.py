@@ -4,12 +4,20 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 from pathlib import Path
 from types import SimpleNamespace as NS
 
 from magbot.config import BotConfig, Config
 from magbot.identity import User
-from magbot.prompt import ContextLine, Image, build_messages, load_overrides, load_persona
+from magbot.prompt import (
+    ContextLine,
+    FileCache,
+    Image,
+    build_messages,
+    load_overrides,
+    load_persona,
+)
 
 REPO_PERSONA = Path(__file__).resolve().parents[1] / "persona.md"
 ALICE = User("u1", "alice#1001", "alice")
@@ -129,3 +137,107 @@ def test_images_become_data_url_parts():
     encoded = base64.b64encode(data).decode("ascii")
     assert content[1] == {"type": "image_url",
                           "image_url": {"url": f"data:image/png;base64,{encoded}"}}
+
+
+def test_replied_to_block_sits_between_context_and_the_message():
+    messages = build(context=[ContextLine("bob#2", "hey", False, id="C1")],
+                     replied_to=ContextLine("magbot", "earlier answer", True, id="R1"))
+    assert messages[1]["content"] == (
+        "[Recent messages in this channel]\n"
+        "- bob#2: hey\n\n"
+        "[The message they are replying to]\n"
+        "magbot (bot): earlier answer\n\n"
+        "[Message from alice#1001]\nhi"
+    )
+
+
+def test_replied_to_block_without_context():
+    messages = build(replied_to=ContextLine("bob#2", "the original", False))
+    assert messages[1]["content"] == (
+        "[The message they are replying to]\nbob#2: the original\n\n"
+        "[Message from alice#1001]\nhi"
+    )
+
+
+def test_replied_to_text_is_flattened_to_one_line():
+    messages = build(replied_to=ContextLine("bob#2", "line one\n\nline two", False))
+    assert "bob#2: line one line two\n" in messages[1]["content"]
+
+
+def set_mtime(path: Path, seconds: int) -> None:
+    os.utime(path, ns=(seconds * 10**9, seconds * 10**9))
+
+
+def test_persona_is_reread_only_when_its_mtime_changes(tmp_path):
+    path = tmp_path / "p.md"
+    path.write_text("first {bot_name}")
+    set_mtime(path, 1_000)
+    config = cfg(names=["zed"], persona_file=str(path))
+    cache = FileCache()
+    assert load_persona(config, cache=cache) == "first zed"
+
+    path.write_text("changed {bot_name}")
+    set_mtime(path, 1_000)              # same mtime: the cached text is still used
+    assert load_persona(config, cache=cache) == "first zed"
+
+    set_mtime(path, 2_000)              # new mtime: re-read and filled in again
+    assert load_persona(config, cache=cache) == "changed zed"
+
+
+def test_missing_persona_warns_once_until_the_file_changes(tmp_path, caplog):
+    path = tmp_path / "p.md"
+    config = cfg(names=["zed"], persona_file=str(path))
+    cache = FileCache()
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            assert "zed" in load_persona(config, cache=cache)
+        warnings = [r for r in caplog.records if "persona file" in r.getMessage()]
+        assert len(warnings) == 1
+
+        path.write_text("back {bot_name}")
+        set_mtime(path, 1_000)
+        assert load_persona(config, cache=cache) == "back zed"
+
+        path.unlink()                   # a new missing state warns again
+        load_persona(config, cache=cache)
+    warnings = [r for r in caplog.records if "persona file" in r.getMessage()]
+    assert len(warnings) == 2
+
+
+def test_overrides_are_reread_when_their_mtime_changes(tmp_path):
+    path = tmp_path / "o.json"
+    path.write_text(json.dumps({"u1": "one"}))
+    set_mtime(path, 1_000)
+    config = cfg(overrides_file=str(path))
+    cache = FileCache()
+    assert load_overrides(config, cache=cache) == {"u1": "one"}
+
+    path.write_text(json.dumps({"u1": "two"}))
+    set_mtime(path, 2_000)
+    assert load_overrides(config, cache=cache) == {"u1": "two"}
+
+
+def test_overrides_recover_after_a_bad_edit(tmp_path, caplog):
+    path = tmp_path / "o.json"
+    path.write_text(json.dumps({"u1": "one"}))
+    set_mtime(path, 1_000)
+    config = cfg(overrides_file=str(path))
+    cache = FileCache()
+    assert load_overrides(config, cache=cache) == {"u1": "one"}
+
+    path.write_text("{ broken")
+    set_mtime(path, 2_000)
+    with caplog.at_level(logging.WARNING):
+        assert load_overrides(config, cache=cache) == {}
+    assert caplog.records
+
+    path.write_text(json.dumps({"u1": "fixed"}))
+    set_mtime(path, 3_000)
+    assert load_overrides(config, cache=cache) == {"u1": "fixed"}
+
+
+def test_missing_overrides_file_is_silent(tmp_path, caplog):
+    config = cfg(overrides_file=str(tmp_path / "none.json"))
+    with caplog.at_level(logging.WARNING):
+        assert load_overrides(config, cache=FileCache()) == {}
+    assert not caplog.records

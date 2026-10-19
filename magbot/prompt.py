@@ -4,9 +4,10 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable
 
 from .config import Config
 from .identity import User
@@ -29,6 +30,7 @@ class ContextLine:
     author: str          # tag
     text: str
     is_bot: bool         # written by magbot itself
+    id: str = ""         # Stoat message id, when known (used to skip duplicates)
 
 
 @dataclass
@@ -38,45 +40,89 @@ class Image:
     name: str
 
 
-def load_persona(config: Config) -> str:
-    """The persona file with {bot_name} and {file_base_url} filled in."""
-    path = Path(config.bot.persona_file)
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as e:
-        log.warning("persona file %s unreadable (%s); using the built-in fallback",
-                    path, e.strerror or type(e).__name__)
-        text = FALLBACK_PERSONA
+class FileCache:
+    """Parsed file contents, re-read only when a file's st_mtime_ns changes.
+
+    A problem (missing, unreadable or unparsable file) is logged once per path and state:
+    the same missing file does not log on every message, but a new state does.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, tuple[int, Any]] = {}   # path -> (mtime_ns, parsed value)
+        self._problems: dict[str, tuple[Any, str]] = {}  # path -> last reported (mtime, reason)
+
+    def load(self, path: str, parse: Callable[[str], Any], *, default: Any, label: str,
+             consequence: str, missing_ok: bool = False) -> Any:
+        """`parse(text)` gives the value. On a problem, returns `default` and logs `consequence`."""
+        key = str(path)
+        try:
+            mtime: int | None = os.stat(key).st_mtime_ns
+        except OSError as e:
+            if missing_ok and isinstance(e, FileNotFoundError):
+                return default
+            return self._problem(key, None, e, default, label, consequence)
+        cached = self._entries.get(key)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+        try:
+            value = parse(Path(key).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            return self._problem(key, mtime, e, default, label, consequence)
+        self._entries[key] = (mtime, value)
+        self._problems.pop(key, None)
+        return value
+
+    def _problem(self, key: str, mtime: int | None, error: Exception, default: Any,
+                 label: str, consequence: str) -> Any:
+        self._entries.pop(key, None)
+        reason = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
+        state = (mtime, reason)
+        if self._problems.get(key) != state:
+            self._problems[key] = state
+            log.warning("%s %s could not be used (%s); %s", label, key, reason, consequence)
+        return default
+
+
+_CACHE = FileCache()
+
+
+def load_persona(config: Config, cache: FileCache | None = None) -> str:
+    """The persona file with {bot_name} and {file_base_url} filled in. Re-read when it changes."""
+    text = (cache or _CACHE).load(
+        config.bot.persona_file, lambda raw: raw, default=FALLBACK_PERSONA,
+        label="persona file", consequence="using the built-in fallback")
     return _fill(text, config)
 
 
-def load_overrides(config: Config) -> dict[str, str]:
-    """Per-user extra rules from the overrides JSON: {"name#1234" or user id: rule}."""
+def load_overrides(config: Config, cache: FileCache | None = None) -> dict[str, str]:
+    """Per-user extra rules from the overrides JSON: {"name#1234" or user id: rule}.
+
+    Re-read when the file changes. A missing file means no overrides and is not logged.
+    """
     if not config.bot.overrides_file:
         return {}
-    path = Path(config.bot.overrides_file)
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    except (OSError, ValueError) as e:
-        log.warning("overrides file %s could not be read: %s", path, e)
-        return {}
+    return (cache or _CACHE).load(
+        config.bot.overrides_file, _parse_overrides, default={},
+        label="overrides file", consequence="ignoring the overrides", missing_ok=True)
+
+
+def _parse_overrides(text: str) -> dict[str, str]:
+    raw = json.loads(text)
     if not isinstance(raw, dict):
-        log.warning("overrides file %s must hold a JSON object", path)
-        return {}
+        raise ValueError("it must hold a JSON object")
     return {str(k): str(v) for k, v in raw.items() if str(v).strip()}
 
 
 def build_messages(*, persona: str, user: User, is_admin: bool, can_shell: bool, text: str,
                    context: list[ContextLine], memories: list[Memory], notes: list[Memory],
-                   override: str | None = None, images: list[Image] = ()) -> list[dict]:
+                   override: str | None = None, images: list[Image] = (),
+                   replied_to: ContextLine | None = None) -> list[dict]:
     """OpenAI chat messages: a system message (persona + speaker) and the user turn."""
     system = "\n\n".join([
         persona.strip(),
         _speaker_section(user, is_admin, can_shell, memories, notes, override),
     ])
-    body = _user_text(user, text, context)
+    body = _user_text(user, text, context, replied_to)
     if images:
         content: str | list[dict] = [{"type": "text", "text": body}]
         for image in images:
@@ -123,13 +169,22 @@ def _speaker_section(user: User, is_admin: bool, can_shell: bool, memories: list
     return "\n".join(lines)
 
 
-def _user_text(user: User, text: str, context: list[ContextLine]) -> str:
+def _author_label(line: ContextLine) -> str:
+    return f"{line.author} (bot)" if line.is_bot else line.author
+
+
+def _user_text(user: User, text: str, context: list[ContextLine],
+               replied_to: ContextLine | None = None) -> str:
     parts = []
     if context:
         lines = ["[Recent messages in this channel]"]
         for line in context:
-            who = f"{line.author} (bot)" if line.is_bot else line.author
-            lines.append(f"- {who}: {_one_line(line.text)}")
+            lines.append(f"- {_author_label(line)}: {_one_line(line.text)}")
         parts.append("\n".join(lines))
+    if replied_to is not None:
+        parts.append("\n".join([
+            "[The message they are replying to]",
+            f"{_author_label(replied_to)}: {_one_line(replied_to.text)}",
+        ]))
     parts.append(f"[Message from {user.tag}]\n{text}")
     return "\n\n".join(parts)

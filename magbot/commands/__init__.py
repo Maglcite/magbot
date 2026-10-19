@@ -112,4 +112,4 @@ async def dispatch(client, message, config: Config, user: User, is_admin: bool) 
 
 
 # Built-in commands register themselves on import.
-from . import help, moderation, purge  # noqa: E402,F401
+from . import help, info, moderation, purge  # noqa: E402,F401

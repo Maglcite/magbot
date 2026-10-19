@@ -8,6 +8,8 @@ users who are not opted in (or who opted out) are skipped, never imported.
 
 Tags are matched to Stoat user ids through the `ID` / `TAG` line pairs in
 optin.list, plus an optional --map file of "<user id> <name#1234>" lines.
+A tag with no known id is imported as pending, under its tag, if that tag is
+opted in; it attaches to the user when they next talk to the bot.
 
     python scripts/import_hermes_memory.py --config /opt/magbot/config.toml \\
         ~/.hermes/profiles/fembot/memories/MEMORY.md \\
@@ -77,7 +79,7 @@ def main() -> int:
     skips = [re.compile(s, re.I) for s in args.skip]
     store = None if args.dry_run else MemoryStore(cfg.data_path / "memory.db")
 
-    counts = {"user": 0, "global": 0, "no consent": 0, "unknown id": 0, "skipped": 0}
+    counts = {"user": 0, "global": 0, "pending": 0, "no consent": 0, "skipped": 0}
     for path in args.files:
         for entry in read_entries(path):
             if any(s.search(entry) for s in skips):
@@ -89,15 +91,17 @@ def main() -> int:
             else:
                 tag = tags[0]
                 uid = ids.get(tag.lower())
-                if uid is None:
-                    counts["unknown id"] += 1
-                    print(f"  no id for {tag}: not imported")
-                    continue
-                if not consent.is_allowed(User(uid, tag, tag)):
+                # Without a known id, consent is checked by tag. An allowed user's entry
+                # is kept under the tag and attaches when that user next talks.
+                if not consent.is_allowed(User(uid or "", tag, tag)):
                     counts["no consent"] += 1
                     print(f"  {tag} is not opted in: not imported")
                     continue
-                owner, label = uid, "user"
+                if uid is None:
+                    owner, label = MemoryStore.tag_key(tag), "pending"
+                    print(f"  no id for {tag}: kept pending under its tag")
+                else:
+                    owner, label = uid, "user"
             counts[label] += 1
             if store is not None:
                 store.add(owner, entry)

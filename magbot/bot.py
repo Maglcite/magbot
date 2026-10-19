@@ -11,7 +11,9 @@ import contextlib
 import logging
 import mimetypes
 import re
-from typing import Any, AsyncIterator
+import time
+from collections import deque
+from typing import Any, AsyncIterator, Callable
 
 import stoat
 
@@ -110,6 +112,55 @@ async def _typing(channel: Any) -> AsyncIterator[None]:
                 log.warning("typing indicator failed to stop: %s", e)
 
 
+class RateLimiter:
+    """Sliding-window request counter per key (a user id).
+
+    Timestamps older than the window are pruned when a key is looked at, keys with no recent
+    requests are dropped, and every window the whole table is swept, so it stays bounded by the
+    users active in the last window or two.
+    """
+
+    def __init__(self, window: float = 60.0, clock: Callable[[], float] = time.monotonic):
+        self.window = window
+        self._clock = clock
+        self._hits: dict[str, deque[float]] = {}
+        self._swept_at = clock()
+
+    def is_limited(self, key: str, limit: int) -> bool:
+        """True if `key` already made `limit` requests in the window. `limit <= 0` is off."""
+        if limit <= 0:
+            return False
+        hits = self._recent(key, self._clock())
+        return hits is not None and len(hits) >= limit
+
+    def record(self, key: str) -> None:
+        """Count one request for `key` now."""
+        now = self._clock()
+        if now - self._swept_at >= self.window:
+            self._sweep(now)
+        hits = self._recent(key, now)
+        if hits is None:
+            hits = self._hits[key] = deque()
+        hits.append(now)
+
+    def _recent(self, key: str, now: float) -> deque[float] | None:
+        hits = self._hits.get(key)
+        if hits is None:
+            return None
+        cutoff = now - self.window
+        while hits and hits[0] <= cutoff:
+            hits.popleft()
+        if not hits:
+            del self._hits[key]
+            return None
+        return hits
+
+    def _sweep(self, now: float) -> None:
+        self._swept_at = now
+        for key in list(self._hits):
+            self._recent(key, now)
+
+
 class MagBot(stoat.Client):
     """The Stoat client. Answers pings, name mentions and DMs from opted-in users."""
 
@@ -121,8 +172,10 @@ class MagBot(stoat.Client):
         self.llm = llm if llm is not None else LLM(config)
         self.consent = consent if consent is not None else Consent(config)
         self.memory = memory if memory is not None else MemoryStore(config.data_path / "memory.db")
-        self.persona = prompt.load_persona(config)
-        self.overrides = prompt.load_overrides(config)
+        self.rate_limiter = RateLimiter()
+        self.started_at = time.time()
+        self.stats = {"replies": 0, "errors": 0, "rate_limited": 0,
+                      "prompt_tokens": 0, "completion_tokens": 0}
         self._slots = asyncio.Semaphore(config.bot.max_concurrent)
         config.www_path.mkdir(parents=True, exist_ok=True)
         config.data_path.mkdir(parents=True, exist_ok=True)
@@ -197,7 +250,12 @@ class MagBot(stoat.Client):
             await self._send(message, REFUSAL, mention=True)
             return
 
-        # 10. The AI path, bounded by the concurrency limit.
+        # 10. Per-user rate limit (admins exempt). Counted only for requests that go to the model.
+        if await self._rate_limited(message, user, is_admin):
+            return
+        self.rate_limiter.record(user.id)
+
+        # 11. The AI path, bounded by the concurrency limit.
         async with self._slots:
             await self._reply_with_ai(message, user, text, is_admin)
 
@@ -258,7 +316,7 @@ class MagBot(stoat.Client):
             newly = None
         # Forget their memories whatever happened to the list.
         try:
-            forgotten = self.memory.forget_user(user.id)
+            forgotten = self.memory.forget_user(user.id, user.tag)
             log.info("opt-out by %s: forgot %d memories", user.tag, forgotten)
         except Exception:
             log.exception("could not forget memories for %s", user.tag)
@@ -289,6 +347,17 @@ class MagBot(stoat.Client):
             log.exception("command dispatch failed for %s", user.tag)
             return True  # never let a broken command fall through to the AI
 
+    async def _rate_limited(self, message, user: User, is_admin: bool) -> bool:
+        """True (and a ⏳ reaction) if this user is over the per-minute AI limit."""
+        limit = self.config.bot.rate_limit_per_minute
+        if is_admin or not self.rate_limiter.is_limited(user.id, limit):
+            return False
+        self.stats["rate_limited"] += 1
+        log.info("rate limit: %s is over %d AI replies per minute; not calling the model",
+                 user.tag, limit)
+        await self._react(message, "⏳")
+        return True
+
     async def _reply_with_ai(self, message, user: User, text: str, is_admin: bool) -> None:
         await self._react(message, "👀")
         query = formatting.strip_address(text, self.config.bot.names) or "Hello!"
@@ -296,10 +365,12 @@ class MagBot(stoat.Client):
         log.info("AI request from %s (admin=%s) in channel %s: %s",
                  user.tag, is_admin, message.channel_id, query[:100])
 
+        self._claim_pending(user)
         context = await self._recent_context(message)
+        replied_to = await self._replied_to(message, context)
         images = await self._images(message)
         messages = prompt.build_messages(
-            persona=self.persona,
+            persona=prompt.load_persona(self.config),
             user=user,
             is_admin=is_admin,
             can_shell=can_shell,
@@ -309,6 +380,7 @@ class MagBot(stoat.Client):
             notes=self._memories(GLOBAL),
             override=self._override(user),
             images=images,
+            replied_to=replied_to,
         )
         ctx = ToolContext(
             config=self.config,
@@ -321,8 +393,12 @@ class MagBot(stoat.Client):
 
         reply = await self._generate(message, messages, ctx)
         if reply is None:
+            self.stats["errors"] += 1
             await self._send(message, ERROR_REPLY)
         else:
+            self.stats["replies"] += 1
+            self.stats["prompt_tokens"] += getattr(reply, "prompt_tokens", 0) or 0
+            self.stats["completion_tokens"] += getattr(reply, "completion_tokens", 0) or 0
             await self._send_reply(message, reply)
         await self._react(message, "✅")
 
@@ -373,12 +449,57 @@ class MagBot(stoat.Client):
                 if not body:
                     continue
                 lines.append(prompt.ContextLine(
-                    author=author.tag, text=body, is_bot=bool(me_id) and author.id == me_id))
+                    author=author.tag, text=body, is_bot=bool(me_id) and author.id == me_id,
+                    id=str(old.id)))
             except Exception as e:
                 log.debug("skipped a context message: %s", e)
         if skipped:
             log.info("context: omitted %d message(s) from authors without opt-in", skipped)
         return lines
+
+    async def _replied_to(self, message, context: list[prompt.ContextLine]
+                          ) -> prompt.ContextLine | None:
+        """The message this one replies to, so the model knows what the user points at.
+
+        Only the first replied-to message that is not already in the context is fetched, and
+        only if its author has opted in. Any failure just means there is no such block.
+        """
+        known = {line.id for line in context if line.id}
+        target = next((str(i) for i in (getattr(message, "replies", None) or [])
+                       if str(i) not in known), None)
+        if target is None:
+            return None
+        try:
+            old = await message.channel.fetch_message(target)
+        except Exception as e:
+            log.debug("could not fetch replied-to message %s: %s", target, e)
+            return None
+        try:
+            author = identity.from_message(old)
+            if not self.consent.is_allowed(author):
+                log.debug("replied-to message is from a user without opt-in; skipped")
+                return None
+            body = formatting.strip_address(old.content or "", self.config.bot.names)
+            body = body[:CONTEXT_CHARS]
+        except Exception as e:
+            log.debug("could not read the replied-to message: %s", e)
+            return None
+        if not body:
+            return None
+        me_id = self._me_id()
+        return prompt.ContextLine(author=author.tag, text=body,
+                                  is_bot=bool(me_id) and author.id == me_id, id=str(old.id))
+
+    def _claim_pending(self, user: User) -> None:
+        """Move memories saved under this user's tag before they had an id to this id."""
+        try:
+            moved = self.memory.claim(user.tag, user.id)
+        except Exception as e:
+            log.warning("could not claim pending memories for %s: %s", user.tag, e)
+            return
+        if moved:
+            log.info("claimed %d pending memor%s for %s", moved,
+                     "y" if moved == 1 else "ies", user.tag)
 
     async def _images(self, message) -> list[prompt.Image]:
         """Image attachments as bytes, at most MAX_IMAGES, each <= MAX_IMAGE_BYTES. Not saved."""
@@ -412,7 +533,8 @@ class MagBot(stoat.Client):
             return []
 
     def _override(self, user: User) -> str | None:
-        return self.overrides.get(user.tag) or self.overrides.get(user.id)
+        overrides = prompt.load_overrides(self.config)  # cached; re-read when the file changes
+        return overrides.get(user.tag) or overrides.get(user.id)
 
     def _name(self) -> str:
         return (self.config.bot.names or ["magbot"])[0]

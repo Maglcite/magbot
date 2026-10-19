@@ -31,6 +31,8 @@ recent_context = 8
 max_concurrent = 4
 # Replies longer than this are split into several messages.
 max_message_chars = 1600
+# AI replies allowed per user per minute; extra requests get a ⏳ reaction. 0 turns it off; admins are exempt.
+rate_limit_per_minute = 6
 # Show model reasoning: "off", "blockquote", "spoiler" or "plain".
 thinking_mode = "off"
 # Upper bound on how many lines of reasoning are shown.

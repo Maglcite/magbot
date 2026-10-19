@@ -269,3 +269,7 @@ Point the proxy back at the old file server port if you changed it.
   back can tell the bot again.
 - Run `loginctl enable-linger "$USER"` once if the user units stop when you log out. The old units
   needed it too.
+
+Memories imported with `scripts/import_hermes_memory.py` for a user whose Stoat id is not known are
+kept under their `name#1234` tag, if that user is opted in. They attach to the account automatically
+the next time that user talks to the bot. Until then they are not used.

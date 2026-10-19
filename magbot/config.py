@@ -34,6 +34,7 @@ class BotConfig:
     recent_context: int = 8                     # earlier channel messages passed as context
     max_concurrent: int = 4                     # replies generated at the same time
     max_message_chars: int = 1600               # longer replies are split
+    rate_limit_per_minute: int = 6              # AI replies per user per minute (0 = off; admins exempt)
     thinking_mode: str = "off"                  # off | blockquote | spoiler | plain
     thinking_max_lines: int = 15
     thinking_max_chars: int = 1200

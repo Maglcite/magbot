@@ -76,9 +76,9 @@ class Fake:
         return self.requests[index][1]
 
 
-def reply_msg(content=None, tool_calls=(), **extra):
+def reply_msg(content=None, tool_calls=(), usage=None, **extra):
     message = NS(role="assistant", content=content, tool_calls=list(tool_calls) or None, **extra)
-    return NS(choices=[NS(message=message)])
+    return NS(choices=[NS(message=message)], usage=usage)
 
 
 def call(call_id: str, name: str, arguments: str = "{}"):
@@ -236,6 +236,42 @@ async def test_vision_downgrade_is_per_provider(config, ctx):
     assert kept[1]["type"] == "image_url"
     # The caller's messages are not modified.
     assert images[1]["content"][1]["type"] == "image_url"
+
+
+async def test_usage_is_summed_across_a_tool_round(config, ctx, register):
+    async def ping(ctx):
+        return "pong"
+
+    register("t_ping", ping)
+    fake = Fake({"p1": [reply_msg(None, [call("c1", "t_ping")],
+                                  usage=NS(prompt_tokens=100, completion_tokens=20)),
+                        reply_msg("done", usage=NS(prompt_tokens=150, completion_tokens=30))]})
+    result = await LLM(config, fake).respond(list(MESSAGES), ctx)
+
+    assert result.tool_calls == 1
+    assert (result.prompt_tokens, result.completion_tokens) == (250, 50)
+
+
+@pytest.mark.parametrize("usage, expected", [
+    (None, (0, 0)),
+    (NS(prompt_tokens=None, completion_tokens=None), (0, 0)),
+    (NS(prompt_tokens=7, completion_tokens=None), (7, 0)),
+])
+async def test_usage_none_or_partial_is_tolerated(config, ctx, usage, expected):
+    fake = Fake({"p1": [reply_msg("x", usage=usage)]})
+    result = await LLM(config, fake).respond(list(MESSAGES), ctx)
+
+    assert result.text == "x"
+    assert (result.prompt_tokens, result.completion_tokens) == expected
+
+
+async def test_response_without_usage_attribute_is_tolerated(config, ctx):
+    bare = NS(choices=[NS(message=NS(role="assistant", content="x", tool_calls=None))])
+    fake = Fake({"p1": [bare]})
+    result = await LLM(config, fake).respond(list(MESSAGES), ctx)
+
+    assert result.text == "x"
+    assert (result.prompt_tokens, result.completion_tokens) == (0, 0)
 
 
 async def test_kwargs_omit_unset_options(config, ctx):

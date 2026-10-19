@@ -220,3 +220,74 @@ def test_close_is_safe_to_call_twice(tmp_path):
     s = MemoryStore(tmp_path / "m.db")
     s.close()
     s.close()
+
+
+def test_tag_key_is_lowercase_and_trimmed():
+    assert MemoryStore.tag_key("  Dave#4004 ") == "tag:dave#4004"
+
+
+def test_claim_moves_pending_memories_to_the_user(store):
+    key = MemoryStore.tag_key("Dave#4004")
+    first = store.add(key, "likes chess")
+    store.add(key, "lives in Leeds")
+    assert store.claim("dave#4004", ALICE) == 2
+    assert [(m.id, m.text) for m in store.for_user(ALICE)] == [
+        (first.id, "likes chess"), (first.id + 1, "lives in Leeds")]
+    assert store.for_user(key) == []
+    assert store.pending_count() == 0
+
+
+def test_claim_with_nothing_pending_is_zero_and_writes_nothing(store):
+    store.add(ALICE, "fact")
+    assert store.claim("nobody#0000", ALICE) == 0
+    assert texts(store.for_user(ALICE)) == ["fact"]
+
+
+def test_claim_drops_pending_copies_the_user_already_has(store):
+    store.add(ALICE, "likes tea")
+    key = MemoryStore.tag_key("dave#4004")
+    store.add(key, "likes tea")
+    store.add(key, "likes cake")
+    assert store.claim("dave#4004", ALICE) == 1
+    assert texts(store.for_user(ALICE)) == ["likes tea", "likes cake"]
+    assert store.pending_count() == 0
+
+
+def test_claim_only_touches_the_given_tag(store):
+    store.add(MemoryStore.tag_key("dave#4004"), "dave fact")
+    store.add(MemoryStore.tag_key("erin#5005"), "erin fact")
+    assert store.claim("dave#4004", ALICE) == 1
+    assert texts(store.for_user(ALICE)) == ["dave fact"]
+    assert store.pending_count() == 1
+    assert texts(store.for_user(MemoryStore.tag_key("erin#5005"))) == ["erin fact"]
+
+
+@pytest.mark.parametrize("tag, user", [("   ", ALICE), ("dave#4004", "")])
+def test_claim_refuses_blank_tag_or_user(store, tag, user):
+    store.add(MemoryStore.tag_key("dave#4004"), "dave fact")
+    assert store.claim(tag, user) == 0
+    assert store.pending_count() == 1
+
+
+def test_pending_count_ignores_real_users_and_global(store):
+    store.add(ALICE, "alice")
+    store.add(BOB, "bob")
+    store.add(MemoryStore.GLOBAL, "server")
+    store.add(MemoryStore.tag_key("dave#4004"), "dave")
+    assert store.pending_count() == 1
+
+
+def test_claim_lookup_uses_the_user_index(store):
+    plan = " ".join(str(row) for row in store._db.execute(
+        "EXPLAIN QUERY PLAN SELECT id, text FROM memories WHERE user_id = ?", ("tag:x",)))
+    assert "memories_by_user" in plan
+
+
+def test_forget_user_with_tag_also_drops_pending_memories():
+    store = MemoryStore(":memory:")
+    store.add("01AAAAAAAAAAAAAAAAAAAAAAA1", "likes birds")
+    store.add(MemoryStore.tag_key("Alice#1001"), "pending note")
+    store.add("01BBBBBBBBBBBBBBBBBBBBBBB2", "someone else")
+    assert store.forget_user("01AAAAAAAAAAAAAAAAAAAAAAA1", "alice#1001") == 2
+    assert store.pending_count() == 0
+    assert len(store.for_user("01BBBBBBBBBBBBBBBBBBBBBBB2")) == 1

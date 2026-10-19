@@ -30,6 +30,8 @@ class Reply:
     reasoning: str = ""
     provider: str = ""
     tool_calls: int = 0
+    prompt_tokens: int = 0       # summed over every model step in the reply
+    completion_tokens: int = 0
 
 
 class LLMError(Exception):
@@ -81,18 +83,23 @@ class LLM:
         reasoning: list[str] = []
         calls_made = 0
         step = 0
+        prompt_tokens = completion_tokens = 0
         while True:
             # After max_tool_steps rounds, the last call is offered no tools,
             # which forces a text answer.
             forced = step >= max_steps
-            msg, provider = await self._complete(convo, None if forced else schemas)
+            msg, provider, usage = await self._complete(convo, None if forced else schemas)
+            prompt_tokens += _field(usage, "prompt_tokens") or 0
+            completion_tokens += _field(usage, "completion_tokens") or 0
             text, thoughts = _split_reasoning(msg)
             reasoning.extend(thoughts)
             calls = [] if forced else _function_calls(msg)
             if not calls:
-                log.info("LLM reply via %s after %d tool call(s)", provider.name, calls_made)
+                log.info("LLM reply via %s after %d tool call(s), %d prompt + %d completion tokens",
+                         provider.name, calls_made, prompt_tokens, completion_tokens)
                 return Reply(text=text or NO_TEXT, reasoning="\n\n".join(reasoning),
-                             provider=provider.name, tool_calls=calls_made)
+                             provider=provider.name, tool_calls=calls_made,
+                             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
             convo.append(_assistant_message(msg, text, calls))
             for call in calls:
                 result = await tools.call(call.function.name, call.function.arguments, ctx)
@@ -101,7 +108,10 @@ class LLM:
             step += 1
 
     async def _complete(self, messages: list[dict], offer: list[dict] | None):
-        """One model step: try each provider in order. Returns (message, provider)."""
+        """One model step: try each provider in order.
+
+        Returns (message, provider, usage). usage is the SDK's usage object, or None.
+        """
         providers = self.config.llm.providers
         if not providers:
             raise LLMError("no LLM providers configured")
@@ -110,7 +120,7 @@ class LLM:
                 client = self._client(index, provider)
                 kwargs = self._kwargs(provider, messages, offer)
                 resp = await client.chat.completions.create(**kwargs)
-                return resp.choices[0].message, provider
+                return resp.choices[0].message, provider, getattr(resp, "usage", None)
             except Exception as e:
                 log.warning("LLM provider %s failed: %s: %s", provider.name,
                             type(e).__name__, e)
