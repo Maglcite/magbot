@@ -843,19 +843,18 @@
   };
 
   // ----------------------------------------------------------- me bar/status
-  // The bot daemon (bot.py) and its AI bridge keep running on the VPS while
-  // this UI holds its own gateway session; surface that so it's obvious.
+  // The bot daemon keeps running on the VPS while this UI holds its own
+  // gateway session; surface that so it's obvious.
   MB.pollEngine = async function () {
     let st;
     try { st = await MB.api('GET', '/botstatus'); } catch (e) { return; }
     const pill = document.getElementById('engine-pill');
     if (!pill) return;
-    const on = !!st.engine, ai = !!st.bridge;
-    pill.className = 'engine-pill ' + (on && ai ? 'ok' : on ? 'warn' : 'bad');
-    pill.textContent = on && ai ? 'bot + ai online' : on ? 'bot online · ai off' : 'bot offline';
+    const on = !!st.engine;
+    pill.className = 'engine-pill ' + (on ? 'ok' : 'bad');
+    pill.textContent = on ? 'bot online' : 'bot offline';
     const mins = on && st.engine.age != null ? Math.round(st.engine.age / 60) : null;
-    pill.title = (on ? `bot.py pid ${st.engine.pid}` + (mins != null ? ` · up ${mins} min` : '') : 'bot.py not running')
-      + (ai ? `\nfembot bridge pid ${st.bridge.pid}` : '\nAI bridge not running')
+    pill.title = (on ? `magbot pid ${st.engine.pid}` + (mins != null ? ` · up ${mins} min` : '') : 'magbot is not running')
       + '\nmessages you type here do NOT trigger the AI (loop guard) — it keeps answering everyone else normally.';
   };
 

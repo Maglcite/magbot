@@ -2,16 +2,16 @@
 """
 magbot web UI — a normal-account Stoat client for the magbot bot token.
 
-Backend: aiohttp only (already in /opt/stoat-bot/venv).
+Backend: aiohttp only (already in /opt/magbot/venv).
   * REST  -> https://api.stoat.chat/0.8   (X-Bot-Token)
   * files -> https://cdn.stoatusercontent.com  (Autumn)
   * live  -> wss://events.stoat.chat      (gateway, own connection; the
-             running bot.py keeps its own — concurrent sessions are fine)
+             running bot keeps its own — concurrent sessions are fine)
 
 Serves a small SPA out of ./static and exposes /api/* which the browser calls.
 Password-protected: the tunnel publishes this to the open internet.
 
-Run: /opt/stoat-bot/venv/bin/python /opt/stoat-bot/webui/server.py
+Run: /opt/magbot/venv/bin/python /opt/magbot/webui/server.py
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from aiohttp import ClientSession, ClientTimeout, FormData, WSMsgType, web
 
 HERE = pathlib.Path(__file__).resolve().parent
 STATIC = HERE / 'static'
-ENV_FILE = pathlib.Path(os.environ.get('ENV_FILE', '/opt/stoat-bot/.env'))
+ENV_FILE = pathlib.Path(os.environ.get('ENV_FILE', '/opt/magbot/.env'))
 CONF_FILE = HERE / 'config.json'
 
 API = os.environ.get('STOAT_API', 'https://api.stoat.chat/0.8')
@@ -549,18 +549,15 @@ def make_app(bot: Bot, conf: dict) -> web.Application:
         return None
 
     async def botstatus(request):
-        """Is the bot daemon + its AI bridge still alive while this UI is open?
+        """Is the bot daemon (`python -m magbot`) still alive while this UI is open?
 
-        Both run as separate processes on this host, so we can report them
+        It runs as a separate process on this host, so we can report it
         independently of the gateway connection this web UI holds.
         """
-        engine = _proc_info('bot.py')
-        bridge = _proc_info('fembot_hermes_bridge.py')
         return json_response({
-            'engine': engine,
-            'bridge': bridge,
+            'engine': _proc_info('-m\0magbot'),   # /proc cmdline args are NUL-separated
             'gateway': bool(bot.ready),
-            'own_ignore': True,   # bot.py ignores its own messages (loop guard)
+            'own_ignore': True,   # the bot ignores its own messages (loop guard)
         })
 
     async def session(request):

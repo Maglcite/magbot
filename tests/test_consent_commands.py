@@ -1,8 +1,16 @@
-#!/usr/bin/env python3
-"""Strict command form: only "magbot opt in" / "magbot opt out" (or @-ping / DM + phrase)."""
-import os, sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import consent
+"""Consent command parsing: the legacy strict-form CASES table, ported.
+
+Every case from the old bot's tests/test_commands.py is kept, run against
+the default bot names from config.
+"""
+from __future__ import annotations
+
+import pytest
+
+from magbot.config import BotConfig, Config
+from magbot.consent import PRESET_OPTIN_MESSAGE, optin_message, parse_command
+
+NAMES = BotConfig().names  # default: magbot, mag bot, mag-bot, fembot
 
 CASES = [
     # (text, pinged, is_dm, expect_optin, expect_optout, note)
@@ -51,13 +59,56 @@ CASES = [
     ("magbot i'd like to opt out", False, False, False, True, "polite intent"),
 ]
 
-fails = 0
-for text, pinged, is_dm, ein, eout, note in CASES:
-    gin = consent.optin_requested(text, pinged=pinged, is_dm=is_dm)
-    gout = consent.optout_requested(text, pinged=pinged, is_dm=is_dm)
-    ok = (gin == ein) and (gout == eout)
-    if not ok:
-        fails += 1
-    print(f"{'ok ' if ok else 'FAIL'} in={gin:<5} out={gout:<5} ping={str(pinged):<5} dm={str(is_dm):<5} | {text!r}  ({note})")
-print(f"\n{len(CASES) - fails}/{len(CASES)} passed")
-sys.exit(1 if fails else 0)
+
+@pytest.mark.parametrize("text,pinged,is_dm,expect_optin,expect_optout,note", CASES)
+def test_legacy_case(text, pinged, is_dm, expect_optin, expect_optout, note):
+    expected = "in" if expect_optin else "out" if expect_optout else None
+    assert parse_command(text, NAMES, pinged=pinged, is_dm=is_dm) == expected, note
+
+
+# ── beyond the legacy table: names come from config ──────────────────────────
+
+def test_configured_names_replace_defaults():
+    assert parse_command("robot opt in", ["robot"], pinged=False, is_dm=False) == "in"
+    assert parse_command("magbot opt in", ["robot"], pinged=False, is_dm=False) is None
+    assert parse_command("mag bot opt out", ["robot"], pinged=False, is_dm=False) is None
+
+
+def test_name_is_a_whole_word():
+    assert parse_command("robot opt in", ["bot"], pinged=False, is_dm=False) is None
+    assert parse_command("bot opt in", ["bot"], pinged=False, is_dm=False) == "in"
+
+
+def test_name_punctuation_is_literal():
+    assert parse_command("r.2 opt in", ["r.2"], pinged=False, is_dm=False) == "in"
+    assert parse_command("rX2 opt in", ["r.2"], pinged=False, is_dm=False) is None
+
+
+def test_multiword_name_allows_flexible_whitespace():
+    assert parse_command("skybot opt in", ["sky bot"], pinged=False, is_dm=False) == "in"
+    assert parse_command("sky   bot opt out", ["sky bot"], pinged=False, is_dm=False) == "out"
+
+
+def test_no_names_only_pings_and_dms_count():
+    assert parse_command("magbot opt in", [], pinged=False, is_dm=False) is None
+    assert parse_command("opt in", [], pinged=True, is_dm=False) == "in"
+    assert parse_command("opt out", [], pinged=False, is_dm=True) == "out"
+
+
+def test_opt_in_checked_before_opt_out():
+    assert parse_command("magbot opt in, not opt out", NAMES, pinged=False, is_dm=False) == "in"
+
+
+def test_empty_text():
+    assert parse_command("", NAMES, pinged=True, is_dm=True) is None
+
+
+def test_optin_message_uses_first_configured_name():
+    default = Config()
+    assert optin_message(default) == PRESET_OPTIN_MESSAGE.format(name="magbot")
+    assert "`magbot opt in`" in optin_message(default)
+
+    custom = Config(bot=BotConfig(names=["robot", "magbot"]))
+    msg = optin_message(custom)
+    assert "`robot opt in`" in msg and "`robot opt out`" in msg
+    assert "magbot" not in msg

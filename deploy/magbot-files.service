@@ -1,0 +1,24 @@
+# Static file server for www_dir (files the bot publishes with write_file and generate_image).
+# Install:  cp deploy/magbot-files.service ~/.config/systemd/user/
+#           systemctl --user daemon-reload && systemctl --user enable --now magbot-files
+#
+# It listens on 127.0.0.1 only. Put a reverse proxy with TLS in front of it
+# (nginx, Caddy, a tunnel) and serve it at bot.file_base_url. Do not publish port 8080 directly.
+# Anyone who can reach the proxy can list and download everything in www_dir.
+
+[Unit]
+Description=magbot static file server (www_dir)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/magbot/www
+ExecStart=/opt/magbot/venv/bin/python -m http.server 8080 --bind 127.0.0.1 --directory /opt/magbot/www
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

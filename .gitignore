@@ -11,3 +11,6 @@ optin-prompted.json
 __pycache__/
 venv/
 www/
+.venv/
+config.toml
+data/

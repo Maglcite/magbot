@@ -1,0 +1,39 @@
+# magbot bot: systemd USER unit.
+# Install:  cp deploy/magbot.service ~/.config/systemd/user/
+#           systemctl --user daemon-reload && systemctl --user enable --now magbot
+# Keep it running after logout (once):  loginctl enable-linger "$USER"
+# Logs:     journalctl --user -u magbot -f
+
+[Unit]
+Description=magbot: AI chat bot for Stoat.chat
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/magbot
+EnvironmentFile=/opt/magbot/.env
+Environment=MAGBOT_CONFIG=/opt/magbot/config.toml
+ExecStart=/opt/magbot/venv/bin/python -m magbot
+Restart=on-failure
+RestartSec=5
+# SIGINT lets the bot close its connections and the memory database cleanly.
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+# Hardening. It is deliberately not strict: run_shell (admins and shell_users only)
+# runs real commands as this user, and ProtectSystem=strict would make most of them
+# fail, so the bot is not given a read-only root.
+#   NoNewPrivileges, PrivateTmp, RestrictSUIDSGID: no effect on the shell tool.
+#   ProtectSystem=full: /usr, /boot and /etc become read-only for the shell, but
+#     /opt/magbot (venv, data, www) stays writable.
+#   ProtectHome is not set: the venv and the shell's own tools may depend on $HOME.
+NoNewPrivileges=true
+PrivateTmp=true
+RestrictSUIDSGID=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=default.target

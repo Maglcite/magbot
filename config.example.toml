@@ -1,0 +1,108 @@
+# magbot settings. Copy to config.toml (or wherever MAGBOT_CONFIG points) and edit.
+#
+# Secrets do not go in this file. API keys and the bot token come from the
+# environment (see .env.example); here you only name the variable to read.
+# Every setting below is shown with its default. Unknown keys are an error,
+# so a typo fails at startup instead of being silently ignored.
+# Relative paths (persona_file, overrides_file) are relative to this file.
+
+[bot]
+# Words that count as addressing the bot, matched case-insensitively.
+names = ["magbot", "mag bot", "mag-bot", "fembot"]
+# Admins: exact "name#1234" tags or Stoat user ids. Admins may use every command and
+# every tool except run_shell, and skip the dangerous-request filter.
+admins = []
+# Users allowed to use run_shell (admins are NOT included automatically). The shell runs
+# as the bot's OS user; non-admins in this list still get dangerous commands refused.
+shell_users = []
+# Directory for consent lists and memory.db. Must be writable by the bot.
+data_dir = "/opt/magbot/data"
+# Public folder for files the bot writes (write_file, generate_image). Also the shell's working directory.
+www_dir = "/opt/magbot/www"
+# Public base URL that www_dir is served under (no trailing slash needed).
+file_base_url = "https://files.example.com"
+# The persona (system prompt) file. Placeholders {bot_name} and {file_base_url} are filled in.
+persona_file = "persona.md"
+# Optional JSON object mapping "name#1234" or a user id to an extra rule for that speaker.
+overrides_file = ""
+# How many earlier channel messages (from consenting users) are passed as context.
+recent_context = 8
+# Replies generated at the same time.
+max_concurrent = 4
+# Replies longer than this are split into several messages.
+max_message_chars = 1600
+# Show model reasoning: "off", "blockquote", "spoiler" or "plain".
+thinking_mode = "off"
+# Upper bound on how many lines of reasoning are shown.
+thinking_max_lines = 15
+# Upper bound on how many characters of reasoning are shown.
+thinking_max_chars = 1200
+
+[llm]
+# Seconds allowed for one whole reply, including tool calls.
+timeout = 120.0
+# Seconds for a single model request; a provider that hangs past this falls back to the next.
+request_timeout = 45.0
+# Model-to-tool round trips per reply before the model is forced to answer in text.
+max_tool_steps = 8
+# Output token limit per model call.
+max_tokens = 3500
+# Sampling temperature. Unset uses the provider default; uncomment to set it.
+# temperature = 0.7
+
+# Providers are tried in the order listed. The first one that answers wins;
+# if a call fails, the next provider is tried for the same step.
+# Any OpenAI-compatible chat-completions endpoint works.
+[[llm.providers]]
+# A label for logs.
+name = "openai"
+# Chat-completions base URL.
+base_url = "https://api.openai.com/v1"
+# Model name sent in each request.
+model = "gpt-4o-mini"
+# Name of the environment variable that holds the API key (the key itself is not stored here).
+api_key_env = "OPENAI_API_KEY"
+# Sent as reasoning_effort only when non-empty (e.g. "low", "medium", "high").
+reasoning_effort = ""
+# True if the model accepts images. When false, image attachments are replaced by a text note.
+vision = true
+
+# Fallback: a local OpenAI-compatible server (Ollama shown; llama.cpp's llama-server also works).
+# Uncomment to enable. A missing key variable is sent as "none", which local servers accept.
+# [[llm.providers]]
+# name = "local"
+# base_url = "http://127.0.0.1:11434/v1"
+# model = "llama3.2"
+# api_key_env = "LOCAL_API_KEY"
+# reasoning_effort = ""
+# vision = false
+
+[tools]
+# Tool names to switch off, e.g. ["run_shell", "fetch_url"].
+disabled = []
+# Web search backend: "duckduckgo" (no key), "searxng" (needs searxng_url) or "brave" (needs a key).
+search_backend = "duckduckgo"
+# Base URL of a SearXNG instance, used when search_backend = "searxng".
+searxng_url = ""
+# Name of the environment variable that holds the Brave Search API key.
+brave_api_key_env = "BRAVE_API_KEY"
+# Characters of a fetched page (or a read file) returned to the model.
+fetch_max_chars = 8000
+# Seconds a shell command may run before it is killed.
+shell_timeout = 30.0
+# Characters of shell output returned to the model.
+shell_max_output = 3000
+# OpenAI-compatible base URL for image generation. Empty means the image tool is off.
+image_base_url = ""
+# Model name sent to the image endpoint (used only when image_base_url is set).
+image_model = ""
+# Name of the environment variable that holds the image API key.
+image_api_key_env = "IMAGE_API_KEY"
+
+[consent]
+# Seconds between opt-in prompts to the same user (43200 = 12 hours).
+prompt_cooldown = 43200
+# Tags or user ids treated as opted in, without a line in optin.list.
+always_allow = []
+# Tags or user ids that are never collected or answered, and are never prompted.
+always_exclude = []

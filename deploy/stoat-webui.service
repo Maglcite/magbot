@@ -1,14 +1,15 @@
 [Unit]
 Description=magbot web UI (Stoat client for the magbot bot account)
-Documentation=file:/opt/stoat-bot/webui/server.py
+Documentation=file:/opt/magbot/webui/server.py
 After=network-online.target
 Wants=network-online.target
 
+# The web UI reads STOAT_BOT_TOKEN from ENV_FILE, which defaults to /opt/magbot/.env.
 [Service]
 Type=simple
-WorkingDirectory=/opt/stoat-bot/webui
+WorkingDirectory=/opt/magbot/webui
 Environment=WEBUI_PORT=8099
-ExecStart=/opt/stoat-bot/venv/bin/python /opt/stoat-bot/webui/server.py
+ExecStart=/opt/magbot/venv/bin/python /opt/magbot/webui/server.py
 Restart=always
 RestartSec=3
 KillSignal=SIGINT
